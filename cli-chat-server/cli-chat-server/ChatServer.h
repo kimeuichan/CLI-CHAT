@@ -44,9 +44,10 @@ typedef struct{
 
 void ErrorHandling(char * message);
 void Init();
-void BroadCasetByRoomIndex(int index, MESSAGE* msg);
+void BroadCasetByRoomIndex(int index, MESSAGE* msg, int cltS);
 void CompressUser(int index);
 void MakeMessge(MESSAGE* message, int type, char* buf, int str_len);
 int FindRoomIndexByCltS(int cltS);
+void JoinRoom(int roomindex, int clts);
 
 #endif

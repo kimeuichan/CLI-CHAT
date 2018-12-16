@@ -15,17 +15,24 @@ SOCKET serverS, cltS;
 void start(){
 	WSADATA wsaData;
 	SOCKADDR_IN serAdr, cltAdr;
-	FD_SET fd;
+	fd_set reads, cpyReads;
 	TIMEVAL timeout;
-	int fdnum, i, strLen, roomIndex;
+	int fdNum, i, strLen, roomIndex;
+	int * intbuf;
 	char * max_error_msg = "Sorry, full access";
 	MESSAGE msg;
-	MESSAGE msgbuf;
+	MESSAGE * msgbuf;
 	char buf[BUF_SIZE];
 	int recvLen;
 	int msgSize = sizeof(msg);
+	int error_code;
 
 	int cltAdrSize;
+
+	// 초기화
+	memset(&roomInfoArr, 0, sizeof(roomInfoArr));
+	memset(&roomArr, 0, sizeof(roomArr));
+	memset(&user, 0, sizeof(user));
 
 	if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0)
 		ErrorHandling("WSAStartup Error");
@@ -46,73 +53,74 @@ void start(){
 	roomCount = 0;
 
 	timeout.tv_sec = 5;
-	timeout.tv_usec = 5000;
+	timeout.tv_usec = 0;
 
-	FD_ZERO(&fd);
-	FD_SET(serverS, &fd);
+	FD_ZERO(&reads);
+	FD_SET(serverS, &reads);
 
-	while (1){
-		if ((fdnum = select(0, &fd, 0, 0, &timeout)) == SOCKET_ERROR)
+	while (1)
+	{
+		cpyReads = reads;
+		timeout.tv_sec = 5;
+		timeout.tv_usec = 5000;
+
+		if ((fdNum = select(0, &cpyReads, 0, 0, &timeout)) == SOCKET_ERROR)
 			break;
 
-		if (fdnum == 0)
+		if (fdNum == 0)
 			continue;
 
-		// 소켓의 요청이 있는지 확인
-		for (i = 0; i < fd.fd_count; i++){
-			if (FD_ISSET(fd.fd_array[i], &fd)){
-				// 서버 소켓은 새로운 통신연결을 뜻함
-				if (fd.fd_array[i] == serverS){
+		for (i = 0; i<reads.fd_count; i++)
+		{
+			if (FD_ISSET(reads.fd_array[i], &cpyReads))
+			{
+				if (reads.fd_array[i] == serverS)     // connection request!
+				{
 					cltAdrSize = sizeof(cltAdr);
 					cltS = accept(serverS, &cltAdr, &cltAdrSize);
 					// 최대 10명이 넘어가면 에러 메시지를 보내고 연결을 끊음
 					if (userCount >= 9){
-						MakeMessge(&msg, ERROR_MESSAGE, "full connected", 14);
-						send(cltS, &msg, sizeof(msg), 0);
-						close(cltS);
-						printf("full connect");
-						break;
+					MakeMessge(&msg, ERROR_MESSAGE, "full connected", 14);
+					send(cltS, &msg, sizeof(msg), 0);
+					close(cltS);
+					printf("full connect");
+					break;
 					}
-					printf("new client connected...\n");
-					FD_SET(cltS, &fd);
+					printf("new client connected... : %d\n", cltS);
+					FD_SET(cltS, &reads);
 					userCount++;
 				}
-				// 아니면 다른 사람이 request를 보낸 것
-				else{
-					recvLen = 0;
-					// MESSAGE 사이즈를 받을 때까지 recv
-					while (recvLen != msgSize){
-						strLen = recv(fd.fd_array[i], buf[recvLen], sizeof(msg), 0);
-						// 클로즈 요청
-						if (strLen == 0){
-							closesocket(fd.fd_array[i]);
-							FD_CLR(fd.fd_array[i], &fd);
-							printf("close socket..\n");
-							userCount--;
-							break;
-						}
-						recvLen += strLen;
+				else    // read message!
+				{
+					recvLen = recv(reads.fd_array[i], buf, sizeof(MESSAGE), 0);
+					if (recvLen == 0)    // close request!
+					{
+						FD_CLR(reads.fd_array[i], &reads);
+						closesocket(cpyReads.fd_array[i]);
+						printf("closed client: %d \n", cpyReads.fd_array[i]);
 					}
-					//메세지 구별
-					memcpy(&msgbuf, buf, sizeof(msg));
-
-					switch (msgbuf.type){
-						// 초기 메세지(룸 정보 전달)
+					else if(recvLen > 0){
+						msgbuf = buf;
+						switch (msgbuf->type){
+							// 초기 메세지(룸 정보 전달)
 						case INIT_MESSAGE:
 							break;
-						// 브로드 캐스팅
+							// 브로드 캐스팅
 						case STRING_MESSAGE:
 						case EMOTICON_MESSAGE:
 							// 유저들을 찾고 방에 메시지 뿌리기
-							roomIndex = FindRoomIndexByCltS(fd.fd_array[i]);
+							roomIndex = FindRoomIndexByCltS(reads.fd_array[i]);
 							if (roomIndex != -1)
-								BroadCasetByRoomIndex(roomIndex, &msg);
+								BroadCasetByRoomIndex(roomIndex, msgbuf, reads.fd_array[i]);
 							else
 								puts("Not founded Room index");
 							break;
-						// 룸에 조인 요청
+							// 룸에 조인 요청
 						case JOIN_ROOM:
+							intbuf = msgbuf->msg;
+							JoinRoom((*intbuf) - 1, reads.fd_array[i]);
 							break;
+						}
 					}
 				}
 			}
@@ -152,14 +160,28 @@ int FindRoomIndexByCltS(int cltS){
 }
 
 void CompressUser(int roomindex, int userindex){
-
+	int i;
+	for(i = userindex; i < roomArr[roomindex].userCount; i++){
+		roomArr[roomindex].cltSock[i] = roomArr[roomindex].cltSock[i + 1];
+	}
+	roomArr[roomindex].userCount--;
 }
 
-void BroadCasetByRoomIndex(int index, MESSAGE* msg){
+void BroadCasetByRoomIndex(int index, MESSAGE* msg, int cltS){
 	int i;
-	for (i = 0; i < roomArr[i].cltSock; i++){
-		send(serverS, &msg, sizeof(MESSAGE), 0);
+	for (i = 0; i < roomArr[index].userCount; i++){
+		if (roomArr[index].cltSock[i] != cltS){
+			printf("send %dth room : %d->%d from : %d\n", index, roomArr[index].cltSock[i], msg->msgLen, cltS);
+			send(roomArr[index].cltSock[i], msg, sizeof(MESSAGE), 0);
+		}
 	}
 }
 
-
+void JoinRoom(int roomindex, int clts){
+	int currentPos = roomArr[roomindex].userCount;
+	if (currentPos >= MAX_ROOM_USER)
+		return;
+	roomArr[roomindex].cltSock[currentPos++] = clts;
+	roomArr[roomindex].userCount = currentPos;
+	printf("%d room's counts : %d\n", roomindex, roomArr[roomindex].userCount);
+}
